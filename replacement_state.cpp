@@ -325,7 +325,7 @@ INT32 CACHE_REPLACEMENT_STATE::Get_My_Victim(UINT32 setIndex, Addr_t PC, Addr_t 
     {
         bool found_dead = false;
         //search the set for a dead block
-        for (int i = 0; i < assoc; i++)
+        for (unsigned int i = 0; i < assoc; i++)
         {
             if (repl[setIndex][i].reuse_bit == false)
             {
@@ -355,9 +355,6 @@ void CACHE_REPLACEMENT_STATE::UpdateMyPolicy(UINT32 setIndex, INT32 updateWayID,
 {
     // update the PC recency stack
     update_PCs(PC);
-
-    // store the reuse bit
-    bool reuse_bit;
 
     // compute current features
     Features features = compute_features(PC, currLine->tag, true);
@@ -396,9 +393,9 @@ void CACHE_REPLACEMENT_STATE::UpdateMyPolicy(UINT32 setIndex, INT32 updateWayID,
                 train(sampler_sets[index][way].features, true); // train on increment
             }
 
-            sampler_sets[index][way].features = features;                              // update the features
-            update_LRU_state(index, way);                                              // update the LRU state
-            sampler_sets[index][way].y_out = predict(sampler_sets[index][i].features); // get prediction on new features
+            sampler_sets[index][way].features = features;                                // update the features
+            update_LRU_state(index, way);                                                // update the LRU state
+            sampler_sets[index][way].y_out = predict(sampler_sets[index][way].features); // get prediction on new features
         }
     }
 
@@ -543,7 +540,7 @@ int CACHE_REPLACEMENT_STATE::get_PLRU_index(const int index)
 
     bitset<15> PLRU_state = plru[index]; // get the current state of the PLRU
 
-    for (int j = 0; j < assoc; j++)
+    for (unsigned int j = 0; j < assoc; j++)
     {
         int bit = (PLRU_state.to_ulong() >> i) & 0x1; // get the bits one by one
         if (bit == 1)                                 // if the bit is 1, go right
@@ -567,7 +564,7 @@ void CACHE_REPLACEMENT_STATE::update_PLRU_state(const int index, const int way)
     int PLRU_state_mask = (1 << PLRU_state_width) - 1;
     int i = 0;
     int mask;
-    for (int j = 0; j < assoc; j++)
+    for (unsigned int j = 0; j < assoc; j++)
     {
         int bit = (way >> (assoc - 1 - j)) & 0x1;
         mask = PLRU_state_mask & (~(1 << i));
@@ -608,7 +605,7 @@ int CACHE_REPLACEMENT_STATE::get_LRU_index(const int index)
 
 void CACHE_REPLACEMENT_STATE::update_LRU_state(const int index, const int way)
 {
-    int lru_position = sampler_sets[index][way].lru.to_ulong();
+    unsigned int lru_position = sampler_sets[index][way].lru.to_ulong();
 
     for (int i = 0; i < SAMPLER_ASSOC; i++)
     {

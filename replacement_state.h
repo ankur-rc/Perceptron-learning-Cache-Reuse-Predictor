@@ -42,15 +42,6 @@ typedef struct
 
 } LINE_REPLACEMENT_STATE;
 
-struct sampler
-{
-  bool valid;
-  bitset<4> lru;
-  Features features;
-  int y_out;
-  bitset<15> partial_tag;
-}; // Jimenez's structures
-
 struct Features
 {
   bitset<8> PC_0;
@@ -60,6 +51,15 @@ struct Features
   bitset<8> tag_rs_4;
   bitset<8> tag_rs_7;
 };
+
+struct sampler
+{
+  bool valid;
+  bitset<4> lru;
+  Features features;
+  int y_out;
+  bitset<15> partial_tag;
+}; // Jimenez's structures
 
 // The implementation for the cache replacement policy
 class CACHE_REPLACEMENT_STATE
