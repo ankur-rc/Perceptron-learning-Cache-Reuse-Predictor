@@ -39,6 +39,7 @@ typedef struct
 
   // CONTESTANTS: Add extra state per cache line here
   bool reuse_bit;
+  bitset<4> lru;
 
 } LINE_REPLACEMENT_STATE;
 
@@ -68,8 +69,8 @@ public:
   LINE_REPLACEMENT_STATE **repl;
   sampler **sampler_sets;
   int **weight_table;
-  bitset<15> *plru;
-  unsigned int pc_hist[4];
+  // bitset<15> *plru;
+  Addr_t pc_hist[4];
 
 private:
   UINT32 numsets;
@@ -109,7 +110,6 @@ private:
                       Addr_t PC, bool cacheHit);
 
   // utilities
-  int lg2(int n);
   void update_PCs(const Addr_t current_PC);
   Features compute_features(const Addr_t PC, const Addr_t address, const bool PC_is_updated);
 
@@ -117,9 +117,9 @@ private:
   int predict(const Features &features);
   void train(const Features &features, bool increment);
 
-  // PLRU get and update
-  int get_PLRU_index(const int index);
-  void update_PLRU_state(const int index, const int way);
+  // Cache LRU get and update
+  int get_cache_LRU_index(const int index);
+  void update_cache_LRU_state(const int unsigned index, const unsigned int way);
 
   // LRU get and update
   int get_LRU_index(const int index);

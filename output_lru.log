@@ -1,0 +1,21 @@
+opened "traces/483.xalancbmk-127B.trace.gz"
+LLC 4194304 bytes, 16 assoc
+icount = 100000027, cycles = 100000027
+icount = 200000121, cycles = 200000121
+icount = 300000143, cycles = 300000143
+icount = 400000250, cycles = 400000250
+icount = 500000421, cycles = 500001686
+icount = 600000465, cycles = 718791614
+icount = 700000634, cycles = 934602027
+icount = 800000776, cycles = 1067075063
+icount = 900000894, cycles = 1167075181
+icount = 1000000980, cycles = 1267075267
+thread 0 reached 1000000980 instructions; stopping
+==========================================================
+=========== Replacement Policy Statistics ================
+==========================================================
+hostname ankurrc-ubuntu
+L3 instructions: core 0: 600000519 
+L3 misses: core 0: 7110986 
+L3 mpki: core 0: 11.8516 
+core 0: 0.4637 IPC
