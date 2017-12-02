@@ -11,19 +11,52 @@ using namespace std;
 
 #include "replacement_state.h"
 
-#define BLOCKSIZE 64
+// this code compiles cleanly in g++-4.1.2/i386 and 64-bit g++-4.2.4/x86_64
+// development and testing were all done on x86_64
 
-#define SAMPLER_ASSOC 16
-#define SAMPLER_SET 64
+// some run-time constants
 
-#define NUM_FEATURES 6
-#define NUM_WEIGHTS 256
-#define MAX_WEIGHT 31
-#define MIN_WEIGHT -32
+int
+    // sampler associativity (changed for 4MB cache)
 
-#define THETA 74
-#define TAU_BYPASS 3
-#define TAU_REPLACE 124
+    dan_sampler_assoc = 12,
+
+    // number of bits used to index predictor; determines number of
+    // entries in prediction tables (changed for 4MB cache)
+
+    dan_predictor_index_bits = 12,
+
+    // number of prediction tables
+
+    dan_predictor_tables = 3,
+
+    // width of prediction saturating counters
+
+    dan_counter_width = 2,
+
+    // predictor must meet this threshold to predict a block is dead
+
+    dan_threshold = 8,
+
+    // number of partial tag bits kept per sampler entry
+
+    dan_sampler_tag_bits = 16,
+
+    // number of trace (partial PC) bits kept per sampler entry
+
+    dan_sampler_trace_bits = 16,
+
+    // number of entries in prediction table; derived from # of index bits
+
+    dan_predictor_table_entries,
+
+    // maximum value of saturating counter; derived from counter width
+
+    dan_counter_max,
+
+    // total number of bits used by all structures; computed in sampler::sampler
+
+    total_bits_used;
 
 ////////////////////////////////////////////////////////////////////////////////
 ////////////////////////////////////////////////////////////////////////////////
@@ -89,30 +122,22 @@ ostream &CACHE_REPLACEMENT_STATE::PrintStats(ostream &out)
 // storage for the replacement state on a per-line/per-cache basis.           //
 //                                                                            //
 ////////////////////////////////////////////////////////////////////////////////
-
 void CACHE_REPLACEMENT_STATE::InitReplacementState()
 {
     // Create the state for sets, then create the state for the ways
-
     repl = new LINE_REPLACEMENT_STATE *[numsets];
-    // plru = new bitset<15>[numsets];
-
     // ensure that we were able to create replacement state
-
     assert(repl);
 
     // Create the state for the sets
     for (UINT32 setIndex = 0; setIndex < numsets; setIndex++)
     {
         repl[setIndex] = new LINE_REPLACEMENT_STATE[assoc];
-        // plru[setIndex] = 0;
 
         for (UINT32 way = 0; way < assoc; way++)
         {
             // initialize stack position (for true LRU)
             repl[setIndex][way].LRUstackposition = way;
-            repl[setIndex][way].reuse_bit = false;
-            repl[setIndex][way].lru = way;
         }
     }
 
@@ -121,43 +146,7 @@ void CACHE_REPLACEMENT_STATE::InitReplacementState()
 
     // Contestants:  ADD INITIALIZATION FOR YOUR HARDWARE HERE
 
-    // Initialize the sampler
-    sampler_sets = new sampler *[SAMPLER_SET];
-    for (int i = 0; i < SAMPLER_SET; i++)
-    {
-        sampler_sets[i] = new sampler[SAMPLER_ASSOC];
-        for (int j = 0; j < SAMPLER_ASSOC; j++)
-        {
-            sampler_sets[i][j].lru = j;
-            sampler_sets[i][j].partial_tag = 0;
-            sampler_sets[i][j].valid = false;
-            sampler_sets[i][j].y_out = 0;
-
-            sampler_sets[i][j].features.PC_0 = 0;
-            sampler_sets[i][j].features.PC_1 = 0;
-            sampler_sets[i][j].features.PC_2 = 0;
-            sampler_sets[i][j].features.PC_3 = 0;
-            sampler_sets[i][j].features.tag_rs_4 = 0;
-            sampler_sets[i][j].features.tag_rs_7 = 0;
-        }
-    }
-
-    // Initialize the weight tables
-    weight_table = new int *[NUM_FEATURES];
-    for (int i = 0; i < NUM_FEATURES; i++)
-    {
-        weight_table[i] = new int[NUM_WEIGHTS];
-        for (int j = 0; j < NUM_WEIGHTS; j++)
-        {
-            weight_table[i][j] = 0;
-        }
-    }
-
-    // Initialize the PC history
-    for (int i = 0; i < 4; i++)
-    {
-        pc_hist[i] = 0;
-    }
+    samp = new sampler(numsets, assoc);
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -167,8 +156,7 @@ void CACHE_REPLACEMENT_STATE::InitReplacementState()
 // index for the line being replaced.                                         //
 //                                                                            //
 ////////////////////////////////////////////////////////////////////////////////
-INT32 CACHE_REPLACEMENT_STATE::GetVictimInSet(UINT32 tid, UINT32 setIndex, const LINE_STATE *vicSet,
-                                              UINT32 assoc, Addr_t PC, Addr_t paddr, UINT32 accessType)
+INT32 CACHE_REPLACEMENT_STATE::GetVictimInSet(UINT32 tid, UINT32 setIndex, const LINE_STATE *vicSet, UINT32 assoc, Addr_t PC, Addr_t paddr, UINT32 accessType)
 {
     // If no invalid lines, then replace based on replacement policy
     if (replPolicy == CRC_REPL_LRU)
@@ -182,11 +170,10 @@ INT32 CACHE_REPLACEMENT_STATE::GetVictimInSet(UINT32 tid, UINT32 setIndex, const
     else if (replPolicy == CRC_REPL_CONTESTANT)
     {
         // Contestants:  ADD YOUR VICTIM SELECTION FUNCTION HERE
-        return Get_My_Victim(setIndex, PC, paddr);
+        return Get_Sampler_Victim(tid, setIndex, vicSet, assoc, PC, paddr, accessType);
     }
 
     // We should never here here
-
     assert(0);
     return -1;
 }
@@ -205,8 +192,6 @@ void CACHE_REPLACEMENT_STATE::UpdateReplacementState(
     UINT32 setIndex, INT32 updateWayID, const LINE_STATE *currLine,
     UINT32 tid, Addr_t PC, UINT32 accessType, bool cacheHit)
 {
-    //fprintf (stderr, "ain't I a stinker? %lld\n", get_cycle_count ());
-    //fflush (stderr);
     // What replacement policy?
     if (replPolicy == CRC_REPL_LRU)
     {
@@ -221,7 +206,8 @@ void CACHE_REPLACEMENT_STATE::UpdateReplacementState(
         // Contestants:  ADD YOUR UPDATE REPLACEMENT STATE FUNCTION HERE
         // Feel free to use any of the input parameters to make
         // updates to your replacement policy
-        UpdateMyPolicy(setIndex, updateWayID, currLine, PC, cacheHit);
+        // if (accessType != ACCESS_WRITEBACK)
+        UpdateSampler(setIndex, currLine->tag, tid, PC, updateWayID, cacheHit);
     }
 }
 
@@ -241,12 +227,11 @@ void CACHE_REPLACEMENT_STATE::UpdateReplacementState(
 INT32 CACHE_REPLACEMENT_STATE::Get_LRU_Victim(UINT32 setIndex)
 {
     // Get pointer to replacement state of current set
-
     LINE_REPLACEMENT_STATE *replSet = repl[setIndex];
+
     INT32 lruWay = 0;
 
     // Search for victim whose stack position is assoc-1
-
     for (UINT32 way = 0; way < assoc; way++)
     {
         if (replSet[way].LRUstackposition == (assoc - 1))
@@ -257,7 +242,6 @@ INT32 CACHE_REPLACEMENT_STATE::Get_LRU_Victim(UINT32 setIndex)
     }
 
     // return lru way
-
     return lruWay;
 }
 
@@ -280,7 +264,6 @@ INT32 CACHE_REPLACEMENT_STATE::Get_Random_Victim(UINT32 setIndex)
 // way and set index.                                                         //
 //                                                                            //
 ////////////////////////////////////////////////////////////////////////////////
-
 void CACHE_REPLACEMENT_STATE::UpdateLRU(UINT32 setIndex, INT32 updateWayID)
 {
     // Determine current LRU stack position
@@ -288,7 +271,6 @@ void CACHE_REPLACEMENT_STATE::UpdateLRU(UINT32 setIndex, INT32 updateWayID)
 
     // Update the stack position of all lines before the current line
     // Update implies incremeting their stack positions by one
-
     for (UINT32 way = 0; way < assoc; way++)
     {
         if (repl[setIndex][way].LRUstackposition < currLRUstackposition)
@@ -302,321 +284,422 @@ void CACHE_REPLACEMENT_STATE::UpdateLRU(UINT32 setIndex, INT32 updateWayID)
 }
 
 ////////////////////////////////////////////////////////////////////////////////
-//                                                                            //
-//                     Get a victim using CRC policy                          //
-//                                                                            //
+// Jimenez's code
 ////////////////////////////////////////////////////////////////////////////////
 
-INT32 CACHE_REPLACEMENT_STATE::Get_My_Victim(UINT32 setIndex, Addr_t PC, Addr_t address)
+// make a trace from a PC (just extract some bits)
+
+unsigned int make_trace(UINT32 tid, predictor *pred, Addr_t PC)
 {
-    int way = 0;
-    // Compute current features
-    Features current_features = compute_features(PC, address, false);
-
-    // Predict using current features
-    int prediction_output = predict(current_features);
-
-    if (prediction_output > TAU_BYPASS) //bypass if reuse prediction is false
-    {
-        update_PCs(PC); // update the PC recency stack
-        way = -1;       // set way to -1
-    }
-    else // if reuse prediction is true; i.e do not bypass
-    {
-        bool found_dead = false;
-        //search the set for a dead block
-        for (unsigned int i = 0; i < assoc; i++)
-        {
-            if (repl[setIndex][i].reuse_bit == false)
-            {
-                found_dead = true;
-                way = i; // return the way with the dead block
-                break;
-            }
-        }
-
-        if (!found_dead) // if no dead block was found, evict using PseudoLRU
-        {
-            way = get_cache_LRU_index(setIndex);
-        }
-    }
-
-    return way;
+    return PC & ((1 << dan_sampler_trace_bits) - 1);
 }
 
-////////////////////////////////////////////////////////////////////////////////
-//                                                                            //
-//                     Update CRC book-keeping structures                     //
-//                                                                            //
-////////////////////////////////////////////////////////////////////////////////
+// called when there is an access to an LLC cache block
 
-void CACHE_REPLACEMENT_STATE::UpdateMyPolicy(UINT32 setIndex, INT32 updateWayID, const LINE_STATE *currLine,
-                                             Addr_t PC, bool cacheHit)
+void CACHE_REPLACEMENT_STATE::UpdateSampler(UINT32 setIndex, Addr_t tag, UINT32 tid, Addr_t PC, INT32 way, bool hit)
 {
-    // update the PC recency stack
-    update_PCs(PC);
 
-    // compute current features
-    Features features = compute_features(PC, currLine->tag, true);
+    // determine if this is a sampler set
 
-    //check to see if current set is a sampler set
-    if (setIndex % (numsets / SAMPLER_SET) == 0)
+    if (setIndex % samp->sampler_modulus == 0)
     {
-        int index = (setIndex / (numsets / SAMPLER_SET));   // sampler index
-        bitset<15> tag = (currLine->tag) & ((1 << 15) - 1); // sampler tag
-        bool block_exists = false;
 
-        for (int i = 0; i < SAMPLER_ASSOC; i++) // check if entry exists for current tag
+        // this is a sampler set.  access the sampler.
+
+        int set = setIndex / samp->sampler_modulus;
+        if (set >= 0 && set < samp->nsampler_sets)
+            samp->access(tid, set, tag, PC);
+    }
+
+    // update default replacement policy
+
+    UpdateLRU(setIndex, way);
+
+    // make the trace
+
+    unsigned int trace = make_trace(tid, samp->pred, PC);
+
+    // get the next prediction for this block using that trace
+
+    repl[setIndex][way].prediction = samp->pred->get_prediction(tid, trace, setIndex);
+}
+
+// called to select a victim.  returns victim way, or -1 if the block should bypass
+
+INT32 CACHE_REPLACEMENT_STATE::Get_Sampler_Victim(UINT32 tid, UINT32 setIndex, const LINE_STATE *vicSet, UINT32 assoc, Addr_t PC, Addr_t paddr, UINT32 accessType)
+{
+
+    // select a victim using default LRU policy
+
+    int r = Get_LRU_Victim(setIndex);
+
+    // look for a predicted dead block
+
+    for (unsigned int i = 0; i < assoc; i++)
+    {
+        if (repl[setIndex][i].prediction)
         {
-            if ((sampler_sets[index][i].partial_tag == tag) && (sampler_sets[index][i].valid)) // there was a match
-            {
-                if (sampler_sets[index][i].y_out > (-THETA) || repl[setIndex][updateWayID].reuse_bit == false) // train if greater than (-theta)
-                {
-                    train(sampler_sets[index][i].features, false); // train predictor on decrement
-                }
 
-                block_exists = true;
-                sampler_sets[index][i].features = features;                              // update the features
-                update_LRU_state(index, i);                                              // update the LRU state
-                sampler_sets[index][i].y_out = predict(sampler_sets[index][i].features); // get prediction on new features
-                break;
-            }
+            // found a predicted dead block; this is our new victim
+
+            r = i;
+            break;
+        }
+    }
+
+    // predict whether this block is "dead on arrival"
+
+    unsigned int trace = make_trace(tid, samp->pred, PC);
+    int prediction = samp->pred->get_prediction(tid, trace, setIndex);
+
+    // if block is predicted dead, then it should bypass the cache
+
+    if (prediction)
+        r = -1; // -1 means bypass
+
+    // return the selected victim
+
+    return r;
+}
+
+// constructor for a sampler set
+
+sampler_set::sampler_set(void)
+{
+
+    // allocate some sampler entries
+
+    blocks = new sampler_entry[dan_sampler_assoc];
+
+    // initialize the LRU replacement algorithm for these entries
+
+    for (int i = 0; i < dan_sampler_assoc; i++)
+        blocks[i].lru_stack_position = i;
+}
+
+// access the sampler with an LLC tag
+
+void sampler::access(UINT32 tid, int set, Addr_t tag, Addr_t PC)
+{
+
+    // get a pointer to this set's sampler entries
+
+    sampler_entry *blocks = &sets[set].blocks[0];
+
+    // get a partial tag to search for
+
+    unsigned int partial_tag = tag & ((1 << dan_sampler_tag_bits) - 1);
+
+    // assume we do not miss
+
+    bool miss = false;
+
+    // this will be the way of the sampler entry we end up hitting or replacing
+
+    int i;
+
+    // search for a matching tag
+
+    for (i = 0; i < dan_sampler_assoc; i++)
+        if (blocks[i].valid && (blocks[i].tag == partial_tag))
+        {
+
+            // we know this block is not dead; inform the predictor
+
+            pred->block_is_dead(tid, blocks[i].trace, false);
+            break;
         }
 
-        if (!block_exists) // there was no match; eviction required in sampler
-        {
-            int way = -1;
+    // did we find a match?
 
-            //look for an invalid block
-            for (unsigned int i = 0; i < assoc; i++)
-            {
-                if (sampler_sets[index][i].valid == false)
-                {
-                    way = i;
+    if (i == dan_sampler_assoc)
+    {
+
+        // no, so this is a miss in the sampler
+
+        miss = true;
+
+        // look for an invalid block to replace
+
+        for (i = 0; i < dan_sampler_assoc; i++)
+            if (blocks[i].valid == false)
+                break;
+
+        // no invalid block?  look for a dead block.
+
+        if (i == dan_sampler_assoc)
+        {
+            // find the LRU dead block
+            for (i = 0; i < dan_sampler_assoc; i++)
+                if (blocks[i].prediction)
                     break;
-                }
-            }
-
-            // if not found, search for dead block within the sampler
-            if (way == -1)
-            {
-                for (unsigned int i = 0; i < assoc; i++)
-                {
-                    if (sampler_sets[index][i].y_out > TAU_REPLACE)
-                    {
-                        way = i;
-                        break;
-                    }
-                }
-            }
-
-            // if not found, use LRU to find the eviction candidate
-            if (way == -1)
-                way = get_LRU_index(index);
-
-            // train if sampler block y_out is less than theta or if prediction was incorrect
-            if (sampler_sets[index][way].y_out < THETA || repl[setIndex][updateWayID].reuse_bit == true)
-            {
-                train(sampler_sets[index][way].features, true); // train on increment
-            }
-
-            sampler_sets[index][way].partial_tag = tag;
-            sampler_sets[index][way].features = features;                                // update the features
-            update_LRU_state(index, way);                                                // update the LRU state
-            sampler_sets[index][way].y_out = predict(sampler_sets[index][way].features); // get prediction on new features
-            sampler_sets[index][way].valid = true;                                       // set valid bit
         }
-    }
 
-    // update PLRU state
-    update_cache_LRU_state(setIndex, updateWayID);
+        // no invalid or dead block?  use the LRU block
 
-    // set reuse bit
-    int y_out = predict(features);
-    repl[setIndex][updateWayID].reuse_bit = (y_out < TAU_REPLACE ? true : false);
-}
-
-////////////////////////////////////////////////////////////////////////////////
-//                                                                            //
-//                     Utility functions                                      //
-//                                                                            //
-////////////////////////////////////////////////////////////////////////////////
-
-void CACHE_REPLACEMENT_STATE::update_PCs(const Addr_t current_PC)
-{
-    for (int i = 3; i > 0; i--)
-        pc_hist[i] = pc_hist[i - 1];
-
-    pc_hist[0] = current_PC;
-}
-
-Features CACHE_REPLACEMENT_STATE::compute_features(const Addr_t PC, const Addr_t address, const bool PC_is_updated)
-{
-    Features current_features;
-    Addr_t PCs[4];
-
-    // if PC is already updated we do not need to shift new PC
-    PCs[0] = (PC_is_updated ? pc_hist[0] : PC);
-    PCs[1] = (PC_is_updated ? pc_hist[1] : pc_hist[0]);
-    PCs[2] = (PC_is_updated ? pc_hist[2] : pc_hist[1]);
-    PCs[3] = (PC_is_updated ? pc_hist[3] : pc_hist[2]);
-
-    Addr_t mask_8 = ((1 << 8) - 1); // mask to extract 8 bits
-
-    current_features.PC_0 = ((PCs[0] >> 2) ^ PC) & mask_8; // feature 1
-    current_features.PC_1 = ((PCs[1] >> 1) ^ PC) & mask_8; // feature 2
-    current_features.PC_2 = ((PCs[2] >> 2) ^ PC) & mask_8; // feature 3
-    current_features.PC_3 = ((PCs[3] >> 3) ^ PC) & mask_8; // feature 4
-
-    // Get the tag from the address
-    int num_index_bits = log2(numsets);
-    int num_offset_bits = log2(BLOCKSIZE);
-    Addr_t tag = (PC_is_updated ? address                                           // if being called from update repl state, we already have the tag
-                                : (address >> (num_index_bits + num_offset_bits))); // otherwise find tag from address
-
-    current_features.tag_rs_4 = ((tag >> 4) ^ PC) & mask_8; // feature 5
-    current_features.tag_rs_7 = ((tag >> 7) ^ PC) & mask_8; // feature 6
-
-    return current_features;
-}
-
-////////////////////////////////////////////////////////////////////////////////
-//                                                                            //
-//                    Predict and train functions                             //
-//                                                                            //
-////////////////////////////////////////////////////////////////////////////////
-
-int CACHE_REPLACEMENT_STATE::predict(const Features &features)
-{
-    int perceptron_output = 0;
-
-    perceptron_output += weight_table[0][features.PC_0.to_ulong()];
-    perceptron_output += weight_table[1][features.PC_1.to_ulong()];
-    perceptron_output += weight_table[2][features.PC_2.to_ulong()];
-    perceptron_output += weight_table[3][features.PC_3.to_ulong()];
-    perceptron_output += weight_table[4][features.tag_rs_4.to_ulong()];
-    perceptron_output += weight_table[5][features.tag_rs_7.to_ulong()];
-
-    return perceptron_output;
-}
-
-void CACHE_REPLACEMENT_STATE::train(const Features &features, bool increment)
-{
-    if (increment == false)
-    {
-        int wt_1 = weight_table[0][features.PC_0.to_ulong()];
-        weight_table[0][features.PC_0.to_ulong()] = (wt_1 > MIN_WEIGHT ? --wt_1 : MIN_WEIGHT);
-
-        int wt_2 = weight_table[1][features.PC_1.to_ulong()];
-        weight_table[1][features.PC_1.to_ulong()] = (wt_2 > MIN_WEIGHT ? --wt_2 : MIN_WEIGHT);
-
-        int wt_3 = weight_table[2][features.PC_2.to_ulong()];
-        weight_table[2][features.PC_2.to_ulong()] = (wt_3 > MIN_WEIGHT ? --wt_3 : MIN_WEIGHT);
-
-        int wt_4 = weight_table[3][features.PC_3.to_ulong()];
-        weight_table[3][features.PC_3.to_ulong()] = (wt_4 > MIN_WEIGHT ? --wt_4 : MIN_WEIGHT);
-
-        int wt_5 = weight_table[4][features.tag_rs_4.to_ulong()];
-        weight_table[4][features.tag_rs_4.to_ulong()] = (wt_5 > MIN_WEIGHT ? --wt_5 : MIN_WEIGHT);
-
-        int wt_6 = weight_table[5][features.tag_rs_7.to_ulong()];
-        weight_table[5][features.tag_rs_7.to_ulong()] = (wt_6 > MIN_WEIGHT ? --wt_6 : MIN_WEIGHT);
-    }
-    else if (increment)
-    {
-        int wt_1 = weight_table[0][features.PC_0.to_ulong()];
-        weight_table[0][features.PC_0.to_ulong()] = (wt_1 < MAX_WEIGHT ? ++wt_1 : MAX_WEIGHT);
-
-        int wt_2 = weight_table[1][features.PC_1.to_ulong()];
-        weight_table[1][features.PC_1.to_ulong()] = (wt_2 < MAX_WEIGHT ? ++wt_2 : MAX_WEIGHT);
-
-        int wt_3 = weight_table[2][features.PC_2.to_ulong()];
-        weight_table[2][features.PC_2.to_ulong()] = (wt_3 < MAX_WEIGHT ? ++wt_3 : MAX_WEIGHT);
-
-        int wt_4 = weight_table[3][features.PC_3.to_ulong()];
-        weight_table[3][features.PC_3.to_ulong()] = (wt_4 < MAX_WEIGHT ? ++wt_4 : MAX_WEIGHT);
-
-        int wt_5 = weight_table[4][features.tag_rs_4.to_ulong()];
-        weight_table[4][features.tag_rs_4.to_ulong()] = (wt_5 < MAX_WEIGHT ? ++wt_5 : MAX_WEIGHT);
-
-        int wt_6 = weight_table[5][features.tag_rs_7.to_ulong()];
-        weight_table[5][features.tag_rs_7.to_ulong()] = (wt_6 < MAX_WEIGHT ? ++wt_6 : MAX_WEIGHT);
-    }
-}
-
-////////////////////////////////////////////////////////////////////////////////
-//                                                                            //
-//                     Cache LRU get way and update functions                 //
-//                                                                            //
-////////////////////////////////////////////////////////////////////////////////
-
-int CACHE_REPLACEMENT_STATE::get_cache_LRU_index(const int index)
-{
-    int way = 0;
-    for (unsigned int i = 0; i < assoc; i++)
-    {
-        if (repl[index][i].lru.to_ulong() == assoc - 1)
+        if (i == dan_sampler_assoc)
         {
-            way = i;
-            break;
+            int j;
+            for (j = 0; j < dan_sampler_assoc; j++)
+                if (blocks[j].lru_stack_position == (unsigned int)(dan_sampler_assoc - 1))
+                    break;
+            assert(j < dan_sampler_assoc);
+            i = j;
         }
+
+        // previous trace leads to block being dead; inform the predictor
+
+        pred->block_is_dead(tid, blocks[i].trace, true);
+
+        // fill the victim block
+
+        blocks[i].tag = partial_tag;
+        blocks[i].valid = true;
     }
 
-    return way;
+    // record the trace
+
+    blocks[i].trace = make_trace(tid, pred, PC);
+
+    // get the next prediction for this entry
+
+    blocks[i].prediction = pred->get_prediction(tid, blocks[i].trace, -1);
+
+    // now the replaced entry should be moved to the MRU position
+
+    unsigned int position = blocks[i].lru_stack_position;
+    for (int way = 0; way < dan_sampler_assoc; way++)
+        if (blocks[way].lru_stack_position < position)
+            blocks[way].lru_stack_position++;
+    blocks[i].lru_stack_position = 0;
 }
 
-void CACHE_REPLACEMENT_STATE::update_cache_LRU_state(const unsigned int index, const unsigned int way)
-{
-    unsigned int lru_position = repl[index][way].lru.to_ulong();
+// constructor for sampler
 
-    for (unsigned int i = 0; i < assoc; i++)
+sampler::sampler(int nsets, int assoc)
+{
+    // four-core version gets slightly different parameters
+
+    if (nsets == 4096)
     {
-        if (repl[index][i].lru.to_ulong() < lru_position)
-            repl[index][i].lru = repl[index][i].lru.to_ulong() + 1;
+        dan_sampler_assoc = 13;
+        dan_predictor_index_bits = 14;
     }
 
-    repl[index][way].lru = 0;
+    // here, we figure out the total number of bits used by the various
+    // structures etc.  along the way we will figure out how many
+    // sampler sets we have room for
+
+    // figure out number of entries in each table
+
+    dan_predictor_table_entries = 1 << dan_predictor_index_bits;
+
+    // compute the total number of bits used by the replacement policy
+
+    // total number of bits available for the contest
+
+    int nbits_total = (nsets * assoc * 8 + 1024);
+
+    // the real LRU policy consumes log(assoc) bits per block
+
+    int nbits_lru = assoc * nsets * (int)log2(assoc);
+
+    // the dead block predictor consumes (counter width) * (number of tables)
+    // * (entries per table) bits
+
+    int nbits_predictor =
+        dan_counter_width * dan_predictor_tables * dan_predictor_table_entries;
+
+    // one prediction bit per cache block.
+
+    int nbits_cache = 1 * nsets * assoc;
+
+    // some extra bits we account for to be safe; figure we need about 85 bits
+    // for the various run-time constants and variables the CRC guys might want
+    // to charge us for.  in reality we leave a bigger surplus than this so we
+    // should be safe.
+
+    int nbits_extra = 85;
+
+    // number of bits left over for the sampler sets
+
+    int nbits_left_over =
+        nbits_total - (nbits_predictor + nbits_cache + nbits_lru + nbits_extra);
+
+    // number of bits in one sampler set: associativity of sampler * bits per sampler block entry
+
+    int nbits_one_sampler_set =
+        dan_sampler_assoc
+        // tag bits, valid bit, prediction bit, trace bits, lru stack position bits
+        * (dan_sampler_tag_bits + 1 + 1 + 4 + dan_sampler_trace_bits);
+
+    // maximum number of sampler of sets we can afford with the space left over
+
+    nsampler_sets = nbits_left_over / nbits_one_sampler_set;
+
+    // compute the maximum saturating counter value; predictor constructor
+    // needs this so we do it here
+
+    dan_counter_max = (1 << dan_counter_width) - 1;
+
+    // make a predictor
+
+    pred = new predictor();
+
+    // we should have at least one sampler set
+
+    assert(nsampler_sets >= 0);
+
+    // make the sampler sets
+
+    sets = new sampler_set[nsampler_sets];
+
+    // figure out what should divide evenly into a set index to be
+    // considered a sampler set
+
+    sampler_modulus = nsets / nsampler_sets;
+
+    // compute total number of bits used; we can print this out to validate
+    // the computation in the paper
+
+    total_bits_used =
+        (nbits_total - nbits_left_over) + (nbits_one_sampler_set * nsampler_sets);
+    //fprintf (stderr, "total bits used %d\n", total_bits_used);
 }
 
-////////////////////////////////////////////////////////////////////////////////
-//                                                                            //
-//                     LRU get way and update functions                       //
-//                                                                            //
-////////////////////////////////////////////////////////////////////////////////
+// constructor for the predictor
 
-int CACHE_REPLACEMENT_STATE::get_LRU_index(const int index)
+predictor::predictor(void)
 {
-    int way = 0;
-    for (int i = 0; i < SAMPLER_ASSOC; i++)
+
+    // make the tables
+
+    tables = new int *[dan_predictor_tables];
+
+    // initialize each table to all 0s
+
+    for (int i = 0; i < dan_predictor_tables; i++)
     {
-        if (sampler_sets[index][i].lru.to_ulong() == SAMPLER_ASSOC - 1)
+        tables[i] = new int[dan_predictor_table_entries];
+        memset(tables[i], 0, sizeof(int) * dan_predictor_table_entries);
+    }
+}
+
+// hash three numbers into one
+
+unsigned int mix(unsigned int a, unsigned int b, unsigned int c)
+{
+    a = a - b;
+    a = a - c;
+    a = a ^ (c >> 13);
+    b = b - c;
+    b = b - a;
+    b = b ^ (a << 8);
+    c = c - a;
+    c = c - b;
+    c = c ^ (b >> 13);
+    return c;
+}
+
+// first hash function
+
+unsigned int f1(unsigned int x)
+{
+    return mix(0xfeedface, 0xdeadb10c, x);
+}
+
+// second hash function
+
+unsigned int f2(unsigned int x)
+{
+    return mix(0xc001d00d, 0xfade2b1c, x);
+}
+
+// generalized hash function
+
+unsigned int fi(unsigned int x, int i)
+{
+    return f1(x) + (f2(x) >> i);
+}
+
+// hash a trace, thread ID, and predictor table number into a predictor table index
+
+unsigned int predictor::get_table_index(UINT32 tid, unsigned int trace, int t)
+{
+    unsigned int x = fi(trace ^ (tid << 2), t);
+    return x & ((1 << dan_predictor_index_bits) - 1);
+}
+
+// inform the predictor that a block is either dead or not dead
+
+void predictor::block_is_dead(UINT32 tid, unsigned int trace, bool d)
+{
+
+    // for each predictor table...
+
+    for (int i = 0; i < dan_predictor_tables; i++)
+    {
+
+        // ...get a pointer to the corresponding entry in that table
+
+        int *c = &tables[i][get_table_index(tid, trace, i)];
+
+        // if the block is dead, increment the counter
+
+        if (d)
         {
-            way = i;
-            break;
+            if (*c < dan_counter_max)
+                (*c)++;
+        }
+        else
+        {
+
+            // otherwise, decrease the counter
+
+            if (i & 1)
+            {
+                // odd numbered tables decrease exponentially
+
+                (*c) >>= 1;
+            }
+            else
+            {
+                // even numbered tables decrease by one
+                if (*c > 0)
+                    (*c)--;
+            }
         }
     }
-
-    return way;
 }
 
-void CACHE_REPLACEMENT_STATE::update_LRU_state(const int index, const int way)
-{
-    unsigned int lru_position = sampler_sets[index][way].lru.to_ulong();
+// get a prediction for a given trace
 
-    for (int i = 0; i < SAMPLER_ASSOC; i++)
+bool predictor::get_prediction(UINT32 tid, unsigned int trace, int set)
+{
+
+    // start the confidence sum as 0
+
+    int conf = 0;
+
+    // for each table...
+    for (int i = 0; i < dan_predictor_tables; i++)
     {
-        if (sampler_sets[index][i].lru.to_ulong() < lru_position)
-            sampler_sets[index][i].lru = sampler_sets[index][i].lru.to_ulong() + 1;
+
+        // ...get the counter value for that table...
+
+        int val = tables[i][get_table_index(tid, trace, i)];
+
+        // and add it to the running total
+
+        conf += val;
     }
 
-    sampler_sets[index][way].lru = 0;
+    // if the counter is at least the threshold, the block is predicted dead
+
+    return conf >= dan_threshold;
 }
 
-////////////////////////////////////////////////////////////////////////////////
-//                                                                            //
-//                     Class destructor                                       //
-//                                                                            //
-////////////////////////////////////////////////////////////////////////////////
+// nothing
 
 CACHE_REPLACEMENT_STATE::~CACHE_REPLACEMENT_STATE(void)
 {
