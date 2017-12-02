@@ -6,6 +6,7 @@
 #include <sys/mman.h>
 #include <map>
 #include <iostream>
+#include <time.h>
 
 using namespace std;
 
@@ -64,6 +65,8 @@ CACHE_REPLACEMENT_STATE::CACHE_REPLACEMENT_STATE(UINT32 _sets, UINT32 _assoc, UI
     mytimer = 0;
 
     InitReplacementState();
+
+    srand(time(NULL));
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -149,7 +152,7 @@ void CACHE_REPLACEMENT_STATE::InitReplacementState()
         weight_table[i] = new int[NUM_WEIGHTS];
         for (int j = 0; j < NUM_WEIGHTS; j++)
         {
-            weight_table[i][j] = 0;
+            weight_table[i][j] = rand() % MAX_WEIGHT + MIN_WEIGHT;
         }
     }
 

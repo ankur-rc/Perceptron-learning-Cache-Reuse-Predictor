@@ -16,6 +16,6 @@ thread 0 reached 1000000980 instructions; stopping
 ==========================================================
 hostname ankurrc-ubuntu
 L3 instructions: core 0: 600000519 
-L3 misses: core 0: 6071697 
-L3 mpki: core 0: 10.1195 
-core 0: 0.5207 IPC
+L3 misses: core 0: 6024396 
+L3 mpki: core 0: 10.0407 
+core 0: 0.5237 IPC
