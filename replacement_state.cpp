@@ -6,7 +6,6 @@
 #include <sys/mman.h>
 #include <map>
 #include <iostream>
-#include <time.h>
 
 using namespace std;
 
@@ -14,18 +13,15 @@ using namespace std;
 
 #define BLOCKSIZE 64
 
-#define SAMPLER_ASSOC 16
+#define SAMPLER_ASSOC 12
 #define SAMPLER_SET 64
 
-#define NUM_FEATURES 6
-#define NUM_WEIGHTS 4096
-#define MAX_WEIGHT 31
-#define MIN_WEIGHT -32
+#define WEIGHT_TABLES 3
+#define NUM_WEIGHTS 8192
 
-#define THETA 74
-#define TAU_BYPASS 0
-#define TAU_REPLACE 124
-#define ALPHA 1
+#define THRESHOLD 8
+
+const bitset<16> HASH[3] = {0x2F75, 0x9FCF, 0xF0D5};
 
 ////////////////////////////////////////////////////////////////////////////////
 ////////////////////////////////////////////////////////////////////////////////
@@ -66,8 +62,6 @@ CACHE_REPLACEMENT_STATE::CACHE_REPLACEMENT_STATE(UINT32 _sets, UINT32 _assoc, UI
     mytimer = 0;
 
     InitReplacementState();
-
-    srand(time(NULL));
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -99,7 +93,6 @@ void CACHE_REPLACEMENT_STATE::InitReplacementState()
     // Create the state for sets, then create the state for the ways
 
     repl = new LINE_REPLACEMENT_STATE *[numsets];
-    // plru = new bitset<15>[numsets];
 
     // ensure that we were able to create replacement state
 
@@ -109,7 +102,6 @@ void CACHE_REPLACEMENT_STATE::InitReplacementState()
     for (UINT32 setIndex = 0; setIndex < numsets; setIndex++)
     {
         repl[setIndex] = new LINE_REPLACEMENT_STATE[assoc];
-        // plru[setIndex] = 0;
 
         for (UINT32 way = 0; way < assoc; way++)
         {
@@ -135,32 +127,20 @@ void CACHE_REPLACEMENT_STATE::InitReplacementState()
             sampler_sets[i][j].lru = j;
             sampler_sets[i][j].partial_tag = 0;
             sampler_sets[i][j].valid = false;
-            sampler_sets[i][j].y_out = 0;
-
-            sampler_sets[i][j].features.PC_0 = 0;
-            sampler_sets[i][j].features.PC_1 = 0;
-            sampler_sets[i][j].features.PC_2 = 0;
-            sampler_sets[i][j].features.PC_3 = 0;
-            sampler_sets[i][j].features.tag_rs_4 = 0;
-            sampler_sets[i][j].features.tag_rs_7 = 0;
+            sampler_sets[i][j].reuse = false;
+            sampler_sets[i][j].trace = 0;
         }
     }
 
-    // Initialize the weight tables
-    weight_table = new int *[NUM_FEATURES];
-    for (int i = 0; i < NUM_FEATURES; i++)
+    // Initialize the weight tables' 2-bit counters
+    weight_table = new unsigned int *[WEIGHT_TABLES];
+    for (int i = 0; i < WEIGHT_TABLES; i++)
     {
-        weight_table[i] = new int[NUM_WEIGHTS];
+        weight_table[i] = new unsigned int[NUM_WEIGHTS];
         for (int j = 0; j < NUM_WEIGHTS; j++)
         {
             weight_table[i][j] = 0;
         }
-    }
-
-    // Initialize the PC history
-    for (int i = 0; i < 4; i++)
-    {
-        pc_hist[i] = 0;
     }
 }
 
@@ -315,15 +295,18 @@ INT32 CACHE_REPLACEMENT_STATE::Get_My_Victim(UINT32 setIndex, Addr_t PC, Addr_t 
 {
     int way = 0;
     // Compute current features
-    Features current_features = compute_features(PC, address, false);
+    bitset<16> *traces = compute_traces(PC);
 
+    // for (int i = 0; i < 3; i++)
+    //     cout << "trace[" << i << "]=" << traces[i] << "\t";
+
+    // cout << endl;
     // Predict using current features
-    int prediction_output = predict(current_features);
+    int prediction_output = predict(traces);
 
-    if (prediction_output > TAU_BYPASS) //bypass if reuse prediction is false
+    if (prediction_output == false) //bypass if reuse prediction is false
     {
-        update_PCs(PC); // update the PC recency stack
-        way = -1;       // set way to -1
+        way = -1; // set way to -1
     }
     else // if reuse prediction is true; i.e do not bypass
     {
@@ -357,32 +340,24 @@ INT32 CACHE_REPLACEMENT_STATE::Get_My_Victim(UINT32 setIndex, Addr_t PC, Addr_t 
 void CACHE_REPLACEMENT_STATE::UpdateMyPolicy(UINT32 setIndex, INT32 updateWayID, const LINE_STATE *currLine,
                                              Addr_t PC, bool cacheHit)
 {
-    // update the PC recency stack
-    update_PCs(PC);
-
-    // compute current features
-    Features features = compute_features(PC, currLine->tag, true);
-
     //check to see if current set is a sampler set
     if (setIndex % (numsets / SAMPLER_SET) == 0)
     {
         int index = (setIndex / (numsets / SAMPLER_SET)); // sampler index
-        Addr_t tag = currLine->tag;                       // sampler tag
+        bitset<16> tag = currLine->tag & ((1 << 16) - 1); // sampler tag
         bool block_exists = false;
 
         for (int i = 0; i < SAMPLER_ASSOC; i++) // check if entry exists for current tag
         {
             if ((sampler_sets[index][i].partial_tag == tag) && (sampler_sets[index][i].valid)) // there was a match
             {
-                if (sampler_sets[index][i].y_out > (-THETA) || repl[setIndex][updateWayID].reuse_bit != true) // train if greater than (-theta)
-                {
-                    train(sampler_sets[index][i].features, false); // train predictor on decrement
-                }
-
-                block_exists = true;
-                sampler_sets[index][i].features = features;                              // update the features
-                update_LRU_state(index, i);                                              // update the LRU state
-                sampler_sets[index][i].y_out = predict(sampler_sets[index][i].features); // get prediction on new features
+                bitset<16> *traces = compute_traces(sampler_sets[index][i].trace);
+                train(traces, false);                           // train predictor on decrement
+                block_exists = true;                            // set flag to true
+                sampler_sets[index][i].trace = PC;              // update the trace
+                update_LRU_state(index, i);                     // update the lru position
+                traces = compute_traces(PC);                    // recompute the traces
+                sampler_sets[index][i].reuse = predict(traces); // get prediction on new traces
                 break;
             }
         }
@@ -392,7 +367,7 @@ void CACHE_REPLACEMENT_STATE::UpdateMyPolicy(UINT32 setIndex, INT32 updateWayID,
             int way = -1;
 
             //look for an invalid block
-            for (unsigned int i = 0; i < assoc; i++)
+            for (unsigned int i = 0; i < SAMPLER_ASSOC; i++)
             {
                 if (sampler_sets[index][i].valid == false)
                 {
@@ -404,9 +379,9 @@ void CACHE_REPLACEMENT_STATE::UpdateMyPolicy(UINT32 setIndex, INT32 updateWayID,
             // if not found, search for dead block within the sampler
             if (way == -1)
             {
-                for (unsigned int i = 0; i < assoc; i++)
+                for (unsigned int i = 0; i < SAMPLER_ASSOC; i++)
                 {
-                    if (sampler_sets[index][i].y_out > TAU_REPLACE)
+                    if (sampler_sets[index][i].reuse == false)
                     {
                         way = i;
                         break;
@@ -418,17 +393,15 @@ void CACHE_REPLACEMENT_STATE::UpdateMyPolicy(UINT32 setIndex, INT32 updateWayID,
             if (way == -1)
                 way = get_LRU_index(index);
 
-            // train if sampler block y_out is less than theta or if prediction was incorrect
-            if (sampler_sets[index][way].y_out < THETA || repl[setIndex][updateWayID].reuse_bit != false)
-            {
-                train(sampler_sets[index][way].features, true); // train on increment
-            }
-
-            sampler_sets[index][way].partial_tag = tag;
-            sampler_sets[index][way].features = features;                                // update the features
-            update_LRU_state(index, way);                                                // update the LRU state
-            sampler_sets[index][way].y_out = predict(sampler_sets[index][way].features); // get prediction on new features
-            sampler_sets[index][way].valid = true;                                       // set valid bit
+            // train
+            bitset<16> *traces = compute_traces(sampler_sets[index][way].trace);
+            train(traces, true);                              // train on increment
+            sampler_sets[index][way].partial_tag = tag;       // set the new tag
+            sampler_sets[index][way].trace = PC;              // update the trace
+            update_LRU_state(index, way);                     // update the LRU state
+            traces = compute_traces(PC);                      // recompute the traces
+            sampler_sets[index][way].reuse = predict(traces); // get prediction on new features
+            sampler_sets[index][way].valid = true;            // set valid bit
         }
     }
 
@@ -436,8 +409,7 @@ void CACHE_REPLACEMENT_STATE::UpdateMyPolicy(UINT32 setIndex, INT32 updateWayID,
     update_cache_LRU_state(setIndex, updateWayID);
 
     // set reuse bit
-    int y_out = predict(features);
-    repl[setIndex][updateWayID].reuse_bit = (y_out < TAU_REPLACE ? true : false);
+    repl[setIndex][updateWayID].reuse_bit = predict(compute_traces(PC));
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -445,106 +417,78 @@ void CACHE_REPLACEMENT_STATE::UpdateMyPolicy(UINT32 setIndex, INT32 updateWayID,
 //                     Utility functions                                      //
 //                                                                            //
 ////////////////////////////////////////////////////////////////////////////////
-
-void CACHE_REPLACEMENT_STATE::update_PCs(const Addr_t current_PC)
+/*
+    A bitwise hash function written by Justin Sobel : http://www.partow.net/programming/hashfunctions/
+*/
+bitset<16> CACHE_REPLACEMENT_STATE::JSHash(bitset<16> hash, bitset<16> trace)
 {
-    for (int i = 3; i > 0; i--)
-        pc_hist[i] = pc_hist[i - 1];
+    unsigned int i = 0;
 
-    pc_hist[0] = current_PC;
+    for (i = 0; i < 16; ++i)
+    {
+        hash ^= ((hash.to_ulong() << 5) + trace[i] + (hash.to_ulong() >> 2));
+    }
+
+    return hash;
 }
 
-Features CACHE_REPLACEMENT_STATE::compute_features(const Addr_t PC, const Addr_t address, const bool PC_is_updated)
+bitset<16> *CACHE_REPLACEMENT_STATE::compute_traces(Addr_t PC)
 {
-    Features current_features;
-    Addr_t PCs[4];
+    bitset<16> *hashed_traces = new bitset<16>[3];
+    bitset<16> mask_16 = ((1 << 16) - 1);
+    bitset<16> trace = PC & mask_16.to_ulong();
 
-    // if PC is already updated we do not need to shift new PC
-    PCs[0] = (PC_is_updated ? pc_hist[0] : PC);
-    PCs[1] = (PC_is_updated ? pc_hist[1] : pc_hist[0]);
-    PCs[2] = (PC_is_updated ? pc_hist[2] : pc_hist[1]);
-    PCs[3] = (PC_is_updated ? pc_hist[3] : pc_hist[2]);
+    for (int i = 0; i < 3; i++)
+    {
+        hashed_traces[i] = JSHash(HASH[i], trace);
+    }
 
-    Addr_t mask_12 = ((1 << 12) - 1); // mask to extract 8 bits
-
-    current_features.PC_0 = ((PCs[0] >> 2) ^ PC) & mask_12; // feature 1
-    current_features.PC_1 = ((PCs[1] >> 1) ^ PC) & mask_12; // feature 2
-    current_features.PC_2 = ((PCs[2] >> 2) ^ PC) & mask_12; // feature 3
-    current_features.PC_3 = ((PCs[3] >> 3) ^ PC) & mask_12; // feature 4
-
-    // Get the tag from the address
-    int num_index_bits = log2(numsets);
-    int num_offset_bits = log2(BLOCKSIZE);
-    Addr_t tag = (PC_is_updated ? address                                           // if being called from update repl state, we already have the tag
-                                : (address >> (num_index_bits + num_offset_bits))); // otherwise find tag from address
-
-    current_features.tag_rs_4 = ((tag >> 4) ^ PC) & mask_12; // feature 5
-    current_features.tag_rs_7 = ((tag >> 7) ^ PC) & mask_12; // feature 6
-
-    return current_features;
+    return hashed_traces;
 }
-
 ////////////////////////////////////////////////////////////////////////////////
 //                                                                            //
 //                    Predict and train functions                             //
 //                                                                            //
 ////////////////////////////////////////////////////////////////////////////////
 
-int CACHE_REPLACEMENT_STATE::predict(const Features &features)
+bool CACHE_REPLACEMENT_STATE::predict(const bitset<16> *traces)
 {
-    int perceptron_output = 0;
+    int output = 0;
+    bitset<13> mask = ((1 << 13) - 1);
 
-    perceptron_output += weight_table[0][features.PC_0.to_ulong()];
-    perceptron_output += weight_table[1][features.PC_1.to_ulong()];
-    perceptron_output += weight_table[2][features.PC_2.to_ulong()];
-    perceptron_output += weight_table[3][features.PC_3.to_ulong()];
-    perceptron_output += weight_table[4][features.tag_rs_4.to_ulong()];
-    perceptron_output += weight_table[5][features.tag_rs_7.to_ulong()];
+    for (int i = 0; i < 3; i++)
+    {
+        unsigned int index = traces[i].to_ulong() & mask.to_ulong();
+        if (index > NUM_WEIGHTS)
+            cout << "trace[" << i << "]: " << index << "\n";
+        output += weight_table[i][index];
+    }
 
-    return perceptron_output;
+    return (output >= THRESHOLD ? false : true);
 }
 
-void CACHE_REPLACEMENT_STATE::train(const Features &features, bool increment)
+void CACHE_REPLACEMENT_STATE::train(const bitset<16> *traces, bool increment)
 {
+    bitset<13> mask_13 = ((1 << (int)(log2(NUM_WEIGHTS))) - 1);
     if (increment == false)
     {
-        int wt_1 = weight_table[0][features.PC_0.to_ulong()];
-        weight_table[0][features.PC_0.to_ulong()] = (wt_1 - ALPHA > MIN_WEIGHT ? wt_1 - ALPHA : MIN_WEIGHT);
-
-        int wt_2 = weight_table[1][features.PC_1.to_ulong()];
-        weight_table[1][features.PC_1.to_ulong()] = (wt_2 - ALPHA > MIN_WEIGHT ? wt_2 - ALPHA : MIN_WEIGHT);
-
-        int wt_3 = weight_table[2][features.PC_2.to_ulong()];
-        weight_table[2][features.PC_2.to_ulong()] = (wt_3 - ALPHA > MIN_WEIGHT ? wt_3 - ALPHA : MIN_WEIGHT);
-
-        int wt_4 = weight_table[3][features.PC_3.to_ulong()];
-        weight_table[3][features.PC_3.to_ulong()] = (wt_4 - ALPHA > MIN_WEIGHT ? wt_4 - ALPHA : MIN_WEIGHT);
-
-        int wt_5 = weight_table[4][features.tag_rs_4.to_ulong()];
-        weight_table[4][features.tag_rs_4.to_ulong()] = (wt_5 - ALPHA > MIN_WEIGHT ? wt_5 - ALPHA : MIN_WEIGHT);
-
-        int wt_6 = weight_table[5][features.tag_rs_7.to_ulong()];
-        weight_table[5][features.tag_rs_7.to_ulong()] = (wt_6 - ALPHA > MIN_WEIGHT ? wt_6 - ALPHA : MIN_WEIGHT);
+        for (int i = 0; i < 3; i++)
+        {
+            unsigned int index = traces[i].to_ulong() & mask_13.to_ulong();
+            int weight = weight_table[i][index];
+            if (i % 2 == 1)
+                weight_table[i][index] = weight >> 1;
+            else
+                weight_table[i][index] = (weight > 0 ? weight-- : 0);
+        }
     }
     else if (increment)
     {
-        int wt_1 = weight_table[0][features.PC_0.to_ulong()];
-        weight_table[0][features.PC_0.to_ulong()] = (wt_1 + ALPHA < MAX_WEIGHT ? wt_1 + ALPHA : MAX_WEIGHT);
-
-        int wt_2 = weight_table[1][features.PC_1.to_ulong()];
-        weight_table[1][features.PC_1.to_ulong()] = (wt_2 + ALPHA < MAX_WEIGHT ? wt_2 + ALPHA : MAX_WEIGHT);
-
-        int wt_3 = weight_table[2][features.PC_2.to_ulong()];
-        weight_table[2][features.PC_2.to_ulong()] = (wt_3 + ALPHA < MAX_WEIGHT ? wt_3 + ALPHA : MAX_WEIGHT);
-
-        int wt_4 = weight_table[3][features.PC_3.to_ulong()];
-        weight_table[3][features.PC_3.to_ulong()] = (wt_4 + ALPHA < MAX_WEIGHT ? wt_4 + ALPHA : MAX_WEIGHT);
-
-        int wt_5 = weight_table[4][features.tag_rs_4.to_ulong()];
-        weight_table[4][features.tag_rs_4.to_ulong()] = (wt_5 + ALPHA < MAX_WEIGHT ? wt_5 + ALPHA : MAX_WEIGHT);
-
-        int wt_6 = weight_table[5][features.tag_rs_7.to_ulong()];
-        weight_table[5][features.tag_rs_7.to_ulong()] = (wt_6 + ALPHA < MAX_WEIGHT ? wt_6 + ALPHA : MAX_WEIGHT);
+        for (int i = 0; i < 3; i++)
+        {
+            int weight = weight_table[i][traces[i].to_ulong() & mask_13.to_ulong()];
+            weight_table[i][traces[i].to_ulong() & mask_13.to_ulong()] = (weight < 3 ? weight++ : 3);
+        }
     }
 }
 

@@ -43,23 +43,13 @@ typedef struct
 
 } LINE_REPLACEMENT_STATE;
 
-struct Features
-{
-  bitset<12> PC_0;
-  bitset<12> PC_1;
-  bitset<12> PC_2;
-  bitset<12> PC_3;
-  bitset<12> tag_rs_4;
-  bitset<12> tag_rs_7;
-};
-
 struct sampler
 {
   bool valid;
   bitset<4> lru;
-  Features features;
-  int y_out;
-  Addr_t partial_tag;
+  Addr_t trace;
+  bool reuse;
+  bitset<16> partial_tag;
 }; // Jimenez's structures
 
 // The implementation for the cache replacement policy
@@ -68,9 +58,7 @@ class CACHE_REPLACEMENT_STATE
 public:
   LINE_REPLACEMENT_STATE **repl;
   sampler **sampler_sets;
-  int **weight_table;
-  // bitset<15> *plru;
-  Addr_t pc_hist[4];
+  unsigned int **weight_table;
 
 private:
   UINT32 numsets;
@@ -110,12 +98,12 @@ private:
                       Addr_t PC, bool cacheHit);
 
   // utilities
-  void update_PCs(const Addr_t current_PC);
-  Features compute_features(const Addr_t PC, const Addr_t address, const bool PC_is_updated);
+  bitset<16> JSHash(bitset<16> hash, bitset<16> trace);
+  bitset<16> *compute_traces(Addr_t PC);
 
   // prediction and training
-  int predict(const Features &features);
-  void train(const Features &features, bool increment);
+  bool predict(const bitset<16> *traces);
+  void train(const bitset<16> *traces, bool increment);
 
   // Cache LRU get and update
   int get_cache_LRU_index(const int index);
