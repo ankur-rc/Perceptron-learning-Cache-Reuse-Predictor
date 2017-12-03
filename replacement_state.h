@@ -22,8 +22,17 @@
 #include "crc_cache_defs.h"
 #include <iostream>
 #include <bitset>
+#include <sstream>
 
 using namespace std;
+
+#define GET_TAUS(name, var)     \
+  {                             \
+    char *value = getenv(name); \
+    stringstream strValue;      \
+    strValue << value;          \
+    strValue >> var;            \
+  }
 
 // Replacement Policies Supported
 typedef enum {

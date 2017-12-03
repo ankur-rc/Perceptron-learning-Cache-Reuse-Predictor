@@ -23,8 +23,10 @@ using namespace std;
 #define MIN_WEIGHT -32
 
 #define THETA 74
-#define TAU_BYPASS 3
-#define TAU_REPLACE 124
+// #define TAU_BYPASS 1
+// #define TAU_REPLACE 124
+
+int TAU_REPLACE = 0, TAU_BYPASS = 0;
 
 ////////////////////////////////////////////////////////////////////////////////
 ////////////////////////////////////////////////////////////////////////////////
@@ -65,6 +67,11 @@ CACHE_REPLACEMENT_STATE::CACHE_REPLACEMENT_STATE(UINT32 _sets, UINT32 _assoc, UI
     mytimer = 0;
 
     InitReplacementState();
+
+    GET_TAUS("BYPASS", TAU_BYPASS);
+    GET_TAUS("REPLACE", TAU_REPLACE);
+
+    // cout << "Tau Bypass: " << TAU_BYPASS << "\tTau Replace: " << TAU_REPLACE << endl;
 
     srand(time(NULL));
 }
