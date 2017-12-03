@@ -15,18 +15,16 @@ using namespace std;
 #define BLOCKSIZE 64
 
 #define SAMPLER_ASSOC 16
-#define SAMPLER_SET 64
+#define SAMPLER_SET 128
 
 #define NUM_FEATURES 6
-#define NUM_WEIGHTS 4096
+#define NUM_WEIGHTS 256
 #define MAX_WEIGHT 31
 #define MIN_WEIGHT -32
 
 #define THETA 74
-// #define TAU_BYPASS 1
-// #define TAU_REPLACE 124
-
-int TAU_REPLACE = 0, TAU_BYPASS = 0;
+#define TAU_BYPASS 3
+#define TAU_REPLACE 124
 
 ////////////////////////////////////////////////////////////////////////////////
 ////////////////////////////////////////////////////////////////////////////////
@@ -68,8 +66,8 @@ CACHE_REPLACEMENT_STATE::CACHE_REPLACEMENT_STATE(UINT32 _sets, UINT32 _assoc, UI
 
     InitReplacementState();
 
-    GET_TAUS("BYPASS", TAU_BYPASS);
-    GET_TAUS("REPLACE", TAU_REPLACE);
+    // GET_TAUS("BYPASS", TAU_BYPASS);
+    // GET_TAUS("REPLACE", TAU_REPLACE);
 
     // cout << "Tau Bypass: " << TAU_BYPASS << "\tTau Replace: " << TAU_REPLACE << endl;
 
@@ -159,7 +157,6 @@ void CACHE_REPLACEMENT_STATE::InitReplacementState()
         weight_table[i] = new int[NUM_WEIGHTS];
         for (int j = 0; j < NUM_WEIGHTS; j++)
         {
-
             weight_table[i][j] = 0;
         }
     }
@@ -232,7 +229,10 @@ void CACHE_REPLACEMENT_STATE::UpdateReplacementState(
         // Contestants:  ADD YOUR UPDATE REPLACEMENT STATE FUNCTION HERE
         // Feel free to use any of the input parameters to make
         // updates to your replacement policy
-        UpdateMyPolicy(setIndex, updateWayID, currLine, PC, cacheHit);
+        if (accessType != ACCESS_PREFETCH)
+            UpdateMyPolicy(setIndex, updateWayID, currLine, PC, cacheHit);
+        else
+            update_PCs(PC);
     }
 }
 
@@ -381,7 +381,7 @@ void CACHE_REPLACEMENT_STATE::UpdateMyPolicy(UINT32 setIndex, INT32 updateWayID,
         {
             if ((sampler_sets[index][i].partial_tag == tag) && (sampler_sets[index][i].valid)) // there was a match
             {
-                if (sampler_sets[index][i].y_out > (-THETA) || repl[setIndex][updateWayID].reuse_bit != true) // train if greater than (-theta)
+                if (sampler_sets[index][i].y_out > (-THETA) || repl[setIndex][updateWayID].reuse_bit != cacheHit) // train if greater than (-theta)
                 {
                     train(sampler_sets[index][i].features, false); // train predictor on decrement
                 }
@@ -399,7 +399,7 @@ void CACHE_REPLACEMENT_STATE::UpdateMyPolicy(UINT32 setIndex, INT32 updateWayID,
             int way = -1;
 
             //look for an invalid block
-            for (unsigned int i = 0; i < assoc; i++)
+            for (unsigned int i = 0; i < SAMPLER_ASSOC; i++)
             {
                 if (sampler_sets[index][i].valid == false)
                 {
@@ -411,7 +411,7 @@ void CACHE_REPLACEMENT_STATE::UpdateMyPolicy(UINT32 setIndex, INT32 updateWayID,
             // if not found, search for dead block within the sampler
             if (way == -1)
             {
-                for (unsigned int i = 0; i < assoc; i++)
+                for (unsigned int i = 0; i < SAMPLER_ASSOC; i++)
                 {
                     if (sampler_sets[index][i].y_out > TAU_REPLACE)
                     {
@@ -426,7 +426,7 @@ void CACHE_REPLACEMENT_STATE::UpdateMyPolicy(UINT32 setIndex, INT32 updateWayID,
                 way = get_LRU_index(index);
 
             // train if sampler block y_out is less than theta or if prediction was incorrect
-            if (sampler_sets[index][way].y_out < THETA || repl[setIndex][updateWayID].reuse_bit != false)
+            if (sampler_sets[index][way].y_out < THETA || repl[setIndex][updateWayID].reuse_bit != cacheHit)
             {
                 train(sampler_sets[index][way].features, true); // train on increment
             }
@@ -472,12 +472,12 @@ Features CACHE_REPLACEMENT_STATE::compute_features(const Addr_t PC, const Addr_t
     PCs[2] = (PC_is_updated ? pc_hist[2] : pc_hist[1]);
     PCs[3] = (PC_is_updated ? pc_hist[3] : pc_hist[2]);
 
-    Addr_t mask_12 = ((1 << 12) - 1); // mask to extract 8 bits
+    Addr_t mask_8 = ((1 << 8) - 1); // mask to extract 8 bits
 
-    current_features.PC_0 = ((PCs[0] >> 2) ^ PC) & mask_12; // feature 1
-    current_features.PC_1 = ((PCs[1] >> 1) ^ PC) & mask_12; // feature 2
-    current_features.PC_2 = ((PCs[2] >> 2) ^ PC) & mask_12; // feature 3
-    current_features.PC_3 = ((PCs[3] >> 3) ^ PC) & mask_12; // feature 4
+    current_features.PC_0 = ((PCs[0] >> 2) ^ PC) & mask_8; // feature 1
+    current_features.PC_1 = ((PCs[1] >> 1) ^ PC) & mask_8; // feature 2
+    current_features.PC_2 = ((PCs[2] >> 2) ^ PC) & mask_8; // feature 3
+    current_features.PC_3 = ((PCs[3] >> 3) ^ PC) & mask_8; // feature 4
 
     // Get the tag from the address
     int num_index_bits = log2(numsets);
@@ -485,8 +485,8 @@ Features CACHE_REPLACEMENT_STATE::compute_features(const Addr_t PC, const Addr_t
     Addr_t tag = (PC_is_updated ? address                                           // if being called from update repl state, we already have the tag
                                 : (address >> (num_index_bits + num_offset_bits))); // otherwise find tag from address
 
-    current_features.tag_rs_4 = ((tag >> 4) ^ PC) & mask_12; // feature 5
-    current_features.tag_rs_7 = ((tag >> 7) ^ PC) & mask_12; // feature 6
+    current_features.tag_rs_4 = ((tag >> 4) ^ PC) & mask_8; // feature 5
+    current_features.tag_rs_7 = ((tag >> 7) ^ PC) & mask_8; // feature 6
 
     return current_features;
 }
@@ -516,42 +516,42 @@ void CACHE_REPLACEMENT_STATE::train(const Features &features, bool increment)
     if (increment == false)
     {
         int wt_1 = weight_table[0][features.PC_0.to_ulong()];
-        weight_table[0][features.PC_0.to_ulong()] = (wt_1 - ALPHA > MIN_WEIGHT ? wt_1 - ALPHA : MIN_WEIGHT);
+        weight_table[0][features.PC_0.to_ulong()] = (wt_1 > MIN_WEIGHT ? wt_1-- : MIN_WEIGHT);
 
         int wt_2 = weight_table[1][features.PC_1.to_ulong()];
-        weight_table[1][features.PC_1.to_ulong()] = (wt_2 - ALPHA > MIN_WEIGHT ? wt_2 - ALPHA : MIN_WEIGHT);
+        weight_table[1][features.PC_1.to_ulong()] = (wt_2 > MIN_WEIGHT ? wt_2-- : MIN_WEIGHT);
 
         int wt_3 = weight_table[2][features.PC_2.to_ulong()];
-        weight_table[2][features.PC_2.to_ulong()] = (wt_3 - ALPHA > MIN_WEIGHT ? wt_3 - ALPHA : MIN_WEIGHT);
+        weight_table[2][features.PC_2.to_ulong()] = (wt_3 > MIN_WEIGHT ? wt_3-- : MIN_WEIGHT);
 
         int wt_4 = weight_table[3][features.PC_3.to_ulong()];
-        weight_table[3][features.PC_3.to_ulong()] = (wt_4 - ALPHA > MIN_WEIGHT ? wt_4 - ALPHA : MIN_WEIGHT);
+        weight_table[3][features.PC_3.to_ulong()] = (wt_4 > MIN_WEIGHT ? wt_4-- : MIN_WEIGHT);
 
         int wt_5 = weight_table[4][features.tag_rs_4.to_ulong()];
-        weight_table[4][features.tag_rs_4.to_ulong()] = (wt_5 - ALPHA > MIN_WEIGHT ? wt_5 - ALPHA : MIN_WEIGHT);
+        weight_table[4][features.tag_rs_4.to_ulong()] = (wt_5 > MIN_WEIGHT ? wt_5-- : MIN_WEIGHT);
 
         int wt_6 = weight_table[5][features.tag_rs_7.to_ulong()];
-        weight_table[5][features.tag_rs_7.to_ulong()] = (wt_6 - ALPHA > MIN_WEIGHT ? wt_6 - ALPHA : MIN_WEIGHT);
+        weight_table[5][features.tag_rs_7.to_ulong()] = (wt_6 > MIN_WEIGHT ? wt_6-- : MIN_WEIGHT);
     }
     else if (increment)
     {
         int wt_1 = weight_table[0][features.PC_0.to_ulong()];
-        weight_table[0][features.PC_0.to_ulong()] = (wt_1 + ALPHA < MAX_WEIGHT ? wt_1 + ALPHA : MAX_WEIGHT);
+        weight_table[0][features.PC_0.to_ulong()] = (wt_1 < MAX_WEIGHT ? wt_1 : MAX_WEIGHT);
 
         int wt_2 = weight_table[1][features.PC_1.to_ulong()];
-        weight_table[1][features.PC_1.to_ulong()] = (wt_2 + ALPHA < MAX_WEIGHT ? wt_2 + ALPHA : MAX_WEIGHT);
+        weight_table[1][features.PC_1.to_ulong()] = (wt_2 < MAX_WEIGHT ? wt_2 : MAX_WEIGHT);
 
         int wt_3 = weight_table[2][features.PC_2.to_ulong()];
-        weight_table[2][features.PC_2.to_ulong()] = (wt_3 + ALPHA < MAX_WEIGHT ? wt_3 + ALPHA : MAX_WEIGHT);
+        weight_table[2][features.PC_2.to_ulong()] = (wt_3 < MAX_WEIGHT ? wt_3 : MAX_WEIGHT);
 
         int wt_4 = weight_table[3][features.PC_3.to_ulong()];
-        weight_table[3][features.PC_3.to_ulong()] = (wt_4 + ALPHA < MAX_WEIGHT ? wt_4 + ALPHA : MAX_WEIGHT);
+        weight_table[3][features.PC_3.to_ulong()] = (wt_4 < MAX_WEIGHT ? wt_4 : MAX_WEIGHT);
 
         int wt_5 = weight_table[4][features.tag_rs_4.to_ulong()];
-        weight_table[4][features.tag_rs_4.to_ulong()] = (wt_5 + ALPHA < MAX_WEIGHT ? wt_5 + ALPHA : MAX_WEIGHT);
+        weight_table[4][features.tag_rs_4.to_ulong()] = (wt_5 < MAX_WEIGHT ? wt_5 : MAX_WEIGHT);
 
         int wt_6 = weight_table[5][features.tag_rs_7.to_ulong()];
-        weight_table[5][features.tag_rs_7.to_ulong()] = (wt_6 + ALPHA < MAX_WEIGHT ? wt_6 + ALPHA : MAX_WEIGHT);
+        weight_table[5][features.tag_rs_7.to_ulong()] = (wt_6 < MAX_WEIGHT ? wt_6 : MAX_WEIGHT);
     }
 }
 

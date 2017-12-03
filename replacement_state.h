@@ -54,12 +54,12 @@ typedef struct
 
 struct Features
 {
-  bitset<12> PC_0;
-  bitset<12> PC_1;
-  bitset<12> PC_2;
-  bitset<12> PC_3;
-  bitset<12> tag_rs_4;
-  bitset<12> tag_rs_7;
+  bitset<8> PC_0;
+  bitset<8> PC_1;
+  bitset<8> PC_2;
+  bitset<8> PC_3;
+  bitset<8> tag_rs_4;
+  bitset<8> tag_rs_7;
 };
 
 struct sampler
