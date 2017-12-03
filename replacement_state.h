@@ -54,12 +54,12 @@ typedef struct
 
 struct Features
 {
-  bitset<8> PC_0;
-  bitset<8> PC_1;
-  bitset<8> PC_2;
-  bitset<8> PC_3;
-  bitset<8> tag_rs_4;
-  bitset<8> tag_rs_7;
+  bitset<12> PC_0;
+  bitset<12> PC_1;
+  bitset<12> PC_2;
+  bitset<12> PC_3;
+  bitset<12> tag_rs_4;
+  bitset<12> tag_rs_7;
 };
 
 struct sampler
@@ -68,7 +68,7 @@ struct sampler
   bitset<4> lru;
   Features features;
   int y_out;
-  bitset<15> partial_tag;
+  Addr_t partial_tag;
 }; // Jimenez's structures
 
 // The implementation for the cache replacement policy
