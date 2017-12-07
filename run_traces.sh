@@ -12,6 +12,7 @@ do
 	export DAN_POLICY=0; 
 	./efectiu traces/"$line.trace.gz" > output_lru.log
         # Now extract IPC from output.txt
+        lru_mpki=$(tail -2 output_lru.log | head -n 1 | awk -F" " '/./{line=$5} END{print line}')
 	last_line=$(awk '/./{line=$0} END{print line}' output_lru.log)
 	arr=($last_line)
 	lru_ipc=${arr[2]}
@@ -21,11 +22,12 @@ do
 	export DAN_POLICY=2; 
 	./efectiu traces/"$line.trace.gz" > output_crc.log
         # Now extract IPC from output.txt
+        crc_mpki=$(tail -2 output_crc.log | head -n 1 | awk -F" " '/./{line=$5} END{print line}')
 	last_line=$(awk '/./{line=$0} END{print line}' output_crc.log)
 	arr=($last_line)
 	my_ipc=${arr[2]}
 	echo "CRC IPC for $line = $my_ipc"
-	echo "$line $lru_ipc $my_ipc" >> results.log
+	echo "$line $lru_mpki $crc_mpki $lru_ipc $my_ipc" >> results.log
 	
 	c=$((c + 1));
 done < "$FILE"

@@ -6,25 +6,24 @@
 #include <sys/mman.h>
 #include <map>
 #include <iostream>
-#include <time.h>
 
 using namespace std;
 
 #include "replacement_state.h"
 
-#define BLOCKSIZE 64
+#define BLOCKSIZE 64 // Cache block size
 
-#define SAMPLER_ASSOC 16
-#define SAMPLER_SET 128
+#define SAMPLER_ASSOC 16 // sampler associativity
+#define SAMPLER_SET 128  // number of sampler sets
 
-#define NUM_FEATURES 6
-#define NUM_WEIGHTS 256
-#define MAX_WEIGHT 31
-#define MIN_WEIGHT -32
+#define NUM_FEATURES 6  // number of features
+#define NUM_WEIGHTS 256 // number of weughts per table
+#define MAX_WEIGHT 31   // maximum weight value
+#define MIN_WEIGHT -32  // minimum weight value
 
-#define THETA 74
-#define TAU_BYPASS 3
-#define TAU_REPLACE 124
+#define THETA 74        // training threshold
+#define TAU_BYPASS 3    // bypass threshold
+#define TAU_REPLACE 124 // reuse threshold
 
 ////////////////////////////////////////////////////////////////////////////////
 ////////////////////////////////////////////////////////////////////////////////
@@ -70,8 +69,6 @@ CACHE_REPLACEMENT_STATE::CACHE_REPLACEMENT_STATE(UINT32 _sets, UINT32 _assoc, UI
     // GET_TAUS("REPLACE", TAU_REPLACE);
 
     // cout << "Tau Bypass: " << TAU_BYPASS << "\tTau Replace: " << TAU_REPLACE << endl;
-
-    srand(time(NULL));
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -591,7 +588,7 @@ void CACHE_REPLACEMENT_STATE::update_cache_LRU_state(const unsigned int index, c
 
 ////////////////////////////////////////////////////////////////////////////////
 //                                                                            //
-//                     LRU get way and update functions                       //
+//                    Sampler LRU get way and update functions                       //
 //                                                                            //
 ////////////////////////////////////////////////////////////////////////////////
 
