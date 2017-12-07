@@ -28,6 +28,4 @@ Similarly, run the following for Arithmetic Mean of MPKI values per trace:
     python calc_amean.py
 
 
-
-
-
+The files to check out are: replacement_state.*
